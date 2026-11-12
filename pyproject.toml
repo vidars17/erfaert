@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roadroute"
+version = "0.1.0"
+description = "Condition-aware routing over Iceland's Vegagerðin road network, packaged as an LLM tool"
+readme = "README.md"
+authors = [{ name = "Viðar Sigurðsson" }]
+license = "MIT"
+license-files = ["LICENSE", "DATA_LICENSE.md"]
+requires-python = ">=3.10"
+dependencies = [
+    "pyproj>=3.4",
+    "httpx>=0.25",
+]
+
+[project.optional-dependencies]
+agent = ["anthropic>=2.0"]
+dev = ["pytest>=7", "anthropic>=2.0"]
+
+[project.scripts]
+roadroute = "roadroute.cli:main"
+roadroute-agent = "roadroute_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs the real Vegagerðin geometry file (see README)",
+]

@@ -1,0 +1,35 @@
+# Python build and cache output
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets: API keys belong in environment variables, never in the repo
+.env
+.env.*
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Raw Vegagerðin geometry export (12.9 MB). Download it yourself (see DATA_LICENSE.md);
+# the repo ships the compact graph built from it, data/network.json.gz.
+faerdferlar2017_1.xml
+# Uncompressed copy of the network; only the .gz is used.
+data/network.json
