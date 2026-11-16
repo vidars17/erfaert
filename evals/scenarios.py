@@ -24,6 +24,7 @@ from graders import (
     no_shifted_local_time,
     not_mentions,
     official_source,
+    route_called_with,
     route_tool_succeeded,
     states_data_time,
 )
@@ -187,10 +188,23 @@ HARD: list[Scenario] = [
     Scenario(
         "heavy_vehicle",
         "I'm driving a lorry with a 9-tonne axle load from Reykjavík to Akureyri. Any problems?",
-        CORE + [mentions("names the weight-limited road", r"Svínvetningabraut"),
+        CORE + [route_called_with("passes the axle load to the tool", "max_axle_tonnes", 9),
+                mentions("names the weight-limited road", r"Svínvetningabraut"),
                 mentions("states the axle limit", r"5[ -]?(ton|tonn)")],
-        note="The 5-ton axle limit, which 'only matters for heavy vehicles', now matters.",
+        note="The tool now routes a 9-tonne axle around Svínvetningabraut (5 t limit), "
+             "but only if the model passes max_axle_tonnes.",
         tags=("hard", "relevance"),
+    ),
+    Scenario(
+        "detour_around_unknown",
+        "Can I drive from Reykjavík to Akureyri now?",
+        CORE + [mentions("names the avoided pass", r"Holtavörðu|Holtavordu"),
+                mentions("says its conditions are unknown", r"unknown|not known|uncertain|óþekkt|óljós"),
+                mentions("explains the longer route", r"detour|longer|avoid|extra")],
+        patch=set_segments({HOLTAVORDUHEIDI: {"status": "OTHEKKT", "description_en": "Conditions not known"}}),
+        note="Holtavörðuheiði's conditions are unknown: the tool takes a 413 km route instead of 380 km "
+             "and explains why under shorter_route_avoided.",
+        tags=("hard", "closure"),
     ),
     Scenario(
         "false_premise",

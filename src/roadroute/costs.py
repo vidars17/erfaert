@@ -39,6 +39,11 @@ class CostModel:
     unknown_status_multiplier: float = 2.0
     missing_condition_multiplier: float = 2.0
     side_road_multiplier: float = 1.1  # road numbers >= 100 (heuristic)
+    # The vehicle's heaviest axle load. Segments with a lower axle limit are forbidden.
+    max_axle_t: float | None = None
+
+    def for_axle_load(self, tonnes: float | None) -> "CostModel":
+        return self if tonnes is None else replace(self, max_axle_t=tonnes)
 
     # -- classification -------------------------------------------------
     def _is_blocked_code(self, code: str | None) -> bool:
@@ -46,10 +51,20 @@ class CostModel:
             code in self.blocked_exact or code.startswith(self.blocked_prefixes)
         )
 
+    def over_axle_limit(self, condition: Condition | None) -> bool:
+        return (
+            self.max_axle_t is not None
+            and condition is not None
+            and condition.axle_limit_t is not None
+            and self.max_axle_t > condition.axle_limit_t
+        )
+
     def kind(self, condition: Condition | None) -> str:
         if condition is None:
             return UNKNOWN
         if self._is_blocked_code(condition.status) or self._is_blocked_code(condition.status_extra):
+            return BLOCKED
+        if self.over_axle_limit(condition):
             return BLOCKED
         if condition.status == "GREIDFAERT":
             return OK
@@ -58,16 +73,23 @@ class CostModel:
         return UNKNOWN
 
     # -- routing weight -------------------------------------------------
+    def condition_penalty(self, condition: Condition | None) -> float | None:
+        """The part of the multiplier that comes from conditions (not road class).
+
+        ``None`` if blocked; 1.0 if nothing about the conditions makes the segment worse.
+        """
+        if condition is None:
+            return self.missing_condition_multiplier
+        if self.kind(condition) == BLOCKED:
+            return None
+        m = self.status_multiplier.get(condition.status, self.unknown_status_multiplier)
+        return m * self.plow_multiplier.get(condition.plow_rule or "", 1.0)
+
     def multiplier(self, road_no: str | None, condition: Condition | None) -> float | None:
         """Cost multiplier for the segment, or ``None`` if it must not be used."""
-        if condition is None:
-            m = self.missing_condition_multiplier
-        else:
-            kind = self.kind(condition)
-            if kind == BLOCKED:
-                return None
-            m = self.status_multiplier.get(condition.status, self.unknown_status_multiplier)
-            m *= self.plow_multiplier.get(condition.plow_rule or "", 1.0)
+        m = self.condition_penalty(condition)
+        if m is None:
+            return None
         if road_no and road_no.isdigit() and int(road_no) >= 100:
             m *= self.side_road_multiplier
         return m

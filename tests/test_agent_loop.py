@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from roadroute_agent import Agent, AgentConfig
-from roadroute_agent.loop import END_TURN, MAX_ITERATIONS, MAX_TOKENS, REFUSAL
-from roadroute_agent.prompts import SYSTEM_PROMPT
+from erfaert import Agent, AgentConfig
+from erfaert.loop import END_TURN, MAX_ITERATIONS, MAX_TOKENS, REFUSAL
+from erfaert.prompts import SYSTEM_PROMPT
 
 NOW = datetime(2026, 11, 6, 15, 0, tzinfo=timezone.utc)
 

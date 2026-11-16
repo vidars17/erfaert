@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from roadroute_agent import AgentResult
+from erfaert import AgentResult
 
 ROUTE_TOOL = "get_route_conditions"
 
@@ -176,3 +176,14 @@ def does_not_open_with_yes() -> Check:
         return not bad, f"opens with {opening!r}"
 
     return Check("does_not_open_with_yes", fn)
+
+
+def route_called_with(name: str, key: str, expected: float, tolerance: float = 0.01) -> Check:
+    """Some successful route lookup was made with arguments[key] == expected (numeric)."""
+
+    def fn(r: AgentResult) -> tuple[bool, str]:
+        seen = [c.input.get(key) for c in r.tool_calls if c.name == ROUTE_TOOL and not c.is_error]
+        ok = any(isinstance(v, (int, float)) and abs(v - expected) <= tolerance for v in seen)
+        return ok, f"{key} values passed: {seen}"
+
+    return Check(name, fn)

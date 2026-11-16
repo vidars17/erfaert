@@ -14,6 +14,8 @@ NO_DATA = "NO_DATA"
 # A start/end point is snapped to a road whose cost multiplier is below this, i.e. one
 # that is passable and not flagged as unknown or out of service (those are >= 2-3x).
 _USABLE_MULTIPLIER = 3.0
+# Detours around penalised (open) roads shorter than this aren't worth a sentence in the answer.
+_MIN_REPORTED_DETOUR_KM = 1.0
 _NOTES = [
     "All times are UTC, which is also Iceland's local time (no daylight saving): 13:11Z is 13:11 in Iceland.",
     "Current conditions only, not a forecast; they can change within hours.",
@@ -77,10 +79,19 @@ class RoutePlanner:
             self._direct[key] = shortest_route(self.network, a, b, [1.0] * len(self.network.seg_ids))
         return self._direct[key]
 
-    def plan(self, origin: Place, destination: Place, vehicle: str = "standard") -> dict[str, Any]:
+    def plan(
+        self,
+        origin: Place,
+        destination: Place,
+        vehicle: str = "standard",
+        max_axle_tonnes: float | None = None,
+    ) -> dict[str, Any]:
         model = PROFILES.get(vehicle)
         if model is None:
             raise ValueError(f"unknown vehicle profile {vehicle!r}; use one of {sorted(PROFILES)}")
+        if max_axle_tonnes is not None and not (0 < max_axle_tonnes <= 100):
+            raise ValueError("max_axle_tonnes must be a number of tonnes between 0 and 100")
+        model = model.for_axle_load(max_axle_tonnes)
         net, snapshot = self.network, self._conditions()
         multipliers = [model.multiplier(info.road_no, snapshot.get(info.id)) for info in net.seg_info]
         start, start_gap = self._snap(origin, multipliers)
@@ -94,6 +105,8 @@ class RoutePlanner:
             "vehicle": model.name,
             "route_found": route is not None,
         }
+        if max_axle_tonnes is not None:
+            result["max_axle_tonnes"] = max_axle_tonnes
         notes = list(_NOTES)
         for place, gap in ((origin, start_gap), (destination, goal_gap)):
             if gap > 1000:
@@ -106,6 +119,9 @@ class RoutePlanner:
         blocked_direct = self._blocked_on_direct(direct, route, model, snapshot, used)
         if blocked_direct:
             result["shorter_route_blocked"] = blocked_direct
+        avoided = self._avoided_on_direct(direct, route, model, snapshot, used)
+        if avoided:
+            result["shorter_route_avoided"] = avoided
 
         if route is None:
             result["reason"] = (
@@ -184,7 +200,10 @@ class RoutePlanner:
             info = self.network.seg_info[leg.segment_idx]
             cond = snapshot.get(info.id)
             if model.kind(cond) == BLOCKED:
-                blocked.append((leg.length_m, cond.name if cond else info.name))
+                name = cond.name if cond else info.name
+                if model.over_axle_limit(cond):
+                    name += f" (axle limit {cond.axle_limit_t:g} t)"
+                blocked.append((leg.length_m, name))
         if not blocked:
             return None
         blocked.sort(reverse=True)
@@ -196,3 +215,49 @@ class RoutePlanner:
         if route is not None:
             out["extra_km_for_detour"] = round((route.length_m - direct.length_m) / 1000, 1)
         return out
+
+    def _avoided_on_direct(
+        self,
+        direct: Route | None,
+        route: Route | None,
+        model,
+        snapshot: ConditionsSnapshot,
+        used: set[int],
+    ) -> dict[str, Any] | None:
+        """Explain a detour taken to avoid segments that are passable but penalised.
+
+        Without this, a route around an "unknown condition" pass comes back longer than
+        expected with no reason given. Only open (not blocked) segments the chosen route
+        skips are listed; blocked ones are reported by _blocked_on_direct.
+        """
+        if direct is None or route is None:
+            return None
+        if {leg.segment_idx for leg in direct.legs} == used:
+            return None
+        avoided = []
+        for leg in direct.legs:
+            if leg.segment_idx in used:
+                continue
+            info = self.network.seg_info[leg.segment_idx]
+            cond = snapshot.get(info.id)
+            penalty = model.condition_penalty(cond)
+            if penalty is None or penalty <= 1.0:
+                continue
+            avoided.append((penalty * leg.length_m, _clean({
+                "segment": cond.name if cond else info.name,
+                "status": cond.status if cond else NO_DATA,
+                "meaning": cond.description_en if cond else "no condition record for this segment",
+                "plow_rule": cond.plow_rule if cond and model.plow_multiplier.get(cond.plow_rule or "", 1.0) > 1 else None,
+            })))
+        extra_km = (route.length_m - direct.length_m) / 1000
+        if not avoided or extra_km < _MIN_REPORTED_DETOUR_KM:
+            return None  # differs only by road class, or by too little to matter
+        avoided.sort(key=lambda item: item[0], reverse=True)
+        return {
+            "direct_km": round(direct.length_m / 1000, 1),
+            "extra_km_for_detour": round(extra_km, 1),
+            "why": "The shorter route uses segments that are open but have unknown or poor "
+                   "conditions; this route avoids them.",
+            "avoided_count": len(avoided),
+            "avoided_examples": [entry for _, entry in avoided[:4]],
+        }

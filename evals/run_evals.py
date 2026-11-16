@@ -21,8 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from roadroute import RoadNetwork, RoutePlanner, Toolbox  # noqa: E402
-from roadroute_agent import Agent, AgentConfig  # noqa: E402
-from roadroute_agent.config import DEFAULT_MODEL  # noqa: E402
+from erfaert import Agent, AgentConfig  # noqa: E402
+from erfaert.config import DEFAULT_MODEL  # noqa: E402
 from scenarios import NOW, SCENARIOS, load_base_snapshot  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]

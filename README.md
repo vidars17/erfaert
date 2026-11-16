@@ -1,6 +1,13 @@
-# roadroute
+# erfaert
 
-Condition-aware routing over Iceland's Vegagerðin road network, packaged as a tool for an LLM agent.
+*"Er fært?"* means "Is it passable?" in Icelandic. It's the question people ask before driving in Iceland in winter, and the one this agent answers from live road data from Vegagerðin (the Icelandic Road and Coastal Administration).
+
+The repo holds two Python packages:
+
+- **`roadroute`**: condition-aware routing over Vegagerðin's road network, packaged as a tool for an LLM. No LLM dependency.
+- **`erfaert`**: the agent, a hand-written tool-use loop over the Claude API that calls `roadroute`, plus evals (`evals/`).
+
+## roadroute
 
 Given two places, it finds a route over the road network, **routes around segments that are closed or impassable right now**, and returns a compact summary of current conditions along the way (a few hundred tokens). The point of the design is that **the model never does geography**: code finds the route, the model interprets the result and writes the answer.
 
@@ -44,9 +51,9 @@ toolbox = Toolbox(RoutePlanner(network, CachedConditions(fetch_conditions, ttl_s
 result_text = toolbox.call(block.name, block.input)   # never raises; errors come back as JSON
 ```
 
-The agent loop that calls these tools is in a separate package, `roadroute_agent` (next section).
+The agent loop that calls these tools is in a separate package, `erfaert` (next section).
 
-## The agent (`roadroute_agent`)
+## The agent (`erfaert`)
 
 A hand-written tool-use loop over the Claude Messages API, with no framework and no SDK tool runner, so every step is visible: send the messages, run the tools the model asks for (concurrently when it asks for several), send all results back in one message, repeat. Guards: an iteration cap, `max_tokens` and `refusal` stop reasons reported rather than ignored, tool failures returned to the model as `is_error` results.
 
@@ -54,8 +61,8 @@ A hand-written tool-use loop over the Claude Messages API, with no framework and
 pip install -e ".[agent]"
 export ANTHROPIC_API_KEY=...      # set a monthly spend limit in the Console first
 
-roadroute-agent "Can I drive from Reykjavík to Akureyri right now?"     --conditions tests/data/faerd2017_1.snapshot.xml -v
-roadroute-agent "Er fært til Ísafjarðar?" --conditions live --model claude-sonnet-5-5
+erfaert "Can I drive from Reykjavík to Akureyri right now?"     --conditions tests/data/faerd2017_1.snapshot.xml -v
+erfaert "Er fært til Ísafjarðar?" --conditions live --model claude-sonnet-5-5
 ```
 
 Each run prints the answer, then the tools used, token counts (read from the API's `usage` field, not estimated) and an estimated cost.
@@ -70,7 +77,7 @@ Each run prints the answer, then the tools used, token counts (read from the API
 
 ### Why a separate package in the same repo
 
-- `roadroute` stays a plain library with no LLM dependency. It can be tested, reused, or wrapped in an MCP server without pulling in the Anthropic SDK (`pip install roadroute` vs `pip install "roadroute[agent]"`).
+- `roadroute` stays a plain library with no LLM dependency. It can be tested, reused, or wrapped in an MCP server without pulling in the Anthropic SDK: a plain `pip install -e .` installs no LLM dependency, and the `[agent]` extra adds it.
 - The dependency points one way: the agent imports the tools; the tools know nothing about the agent.
 - One repo, because the two change together (a tool output change usually needs a prompt change) and there is only one consumer. Splitting into two repos would add versioning work with no benefit yet.
 
@@ -143,19 +150,55 @@ The differences are in judgment on cases the tool doesn't cover, and the checks 
 - **Hveravellir.** Haiku called the tool with coordinates it remembered (`64.8667,-19.5667`, which are about right), found that Kjalvegur is impassable and answered from that data. Sonnet said the place isn't in the data and added, from general knowledge, that the Kjölur road is normally closed in winter. Haiku's answer is more useful, but it depends on coordinates the model recalled rather than looked up.
 - **The lorry.** Both flagged the 5-ton axle limit on Svínvetningabraut. Haiku said it couldn't confirm an alternative from the data. Sonnet suggested staying on Route 1 between Blönduós and Varmahlíð. That's true on the ground but not in the data: our geometry has no Ring Road segment there (see the table at the top of this README), so the suggestion can't be checked with the tool.
 
-Tool gaps the hard scenarios exposed:
-- **No weight-aware routing.** The tool can report a weight limit but can't route around it. A `max_axle_tonnes` input would let the model answer the lorry question from data.
-- **Silent detours around unknown roads.** While building `several_cautions` I set Holtavörðuheiði to `OTHEKKT` (unknown). The router avoided it, which is right, but the result gave no reason for the 413 km route instead of 380 km. `shorter_route_blocked` only reports closed segments, not penalised ones.
+Tool gaps the hard scenarios exposed (both now fixed):
+- **No weight-aware routing.** The tool reported weight limits but couldn't route around them. It now takes `max_axle_tonnes` and avoids segments with a lower axle limit, read from the feed's structured code (`5TONN`). A 9-tonne lorry from Reykjavík to Akureyri now goes around Svínvetningabraut, adding 6.6 km, and the result says why. The `heavy_vehicle` scenario checks that the model passes the load.
+- **Unexplained detours around unknown roads.** With Holtavörðuheiði set to `OTHEKKT`, the router took a 413 km route instead of 380 km and gave no reason. Results now include `shorter_route_avoided` (the open-but-penalised segments, and the extra distance) when the detour is at least 1 km. New scenario: `detour_around_unknown`.
+
+### LLM judge (`evals/judge.py`)
+
+Pattern checks can't see judgment, so a second model grades saved runs against a rubric: five pass/fail criteria, each with a reason.
+
+| Criterion | Fails when |
+|---|---|
+| `grounded` | a claim about roads, routes, distances or times isn't in the tool results, or general knowledge is presented as checked data |
+| `status_accuracy` | something is called open that isn't GREIDFAERT, or the reverse |
+| `completeness` | something in the results that matters for this user is left out |
+| `fits_the_user` | the answer ignores the user's vehicle, timing or a false assumption |
+| `honest_about_limits` | the answer overstates what the data can tell |
+
+```bash
+python evals/judge.py evals/results/<run>.json             # trial 1 of each scenario
+python evals/judge.py evals/results/<run>.json --trials all
+```
+
+The judge is Opus 5.5 by default, so it's more capable than the models it grades. It sees exactly what the agent saw (the current time, the question, every tool result) plus a note on what each scenario tests. Its output is constrained to a JSON schema and validated with Pydantic. Judging costs about 3 cents per run, roughly 25x the cost of the Haiku run it grades.
+
+**Results on Haiku 5.5 (17 scenarios, trial 1):**
+
+| Round | Pattern checks | Judge: all five criteria | What changed |
+|---|---|---|---|
+| 1 | 17/17 | 5/17 | First judge run. |
+| 2 | 17/17 | 14/17 | Fixed two judge errors and four agent problems (below). |
+
+The first judge run mixed real findings with errors of the judge's own, so each verdict had to be checked against the data:
+- **Judge errors.** It marked "the data is about two hours old" as invented, because it hadn't been shown the current time the agent was given. It also treated old segment registration times as stale data; in Vegagerðin's feed an old registration time means the condition hasn't changed since. Fix: the judge now gets the agent's context and a short background section.
+- **Real agent problems.** Haiku described a detour as going "through Staðarskáli and Blönduós" when the route actually crossed Brattabrekka and Laxárdalsheiði, which would have sent a driver over the pass the tool avoided. It softened a "not suitable for high-sided vehicles" warning for a camper van. It said more than the data supports about why no route existed. Fix: prompt rules to describe routes only from segment names, to state vehicle-specific warnings plainly, and to keep "no route" answers to what the tool lists.
+- **A tool problem.** `shorter_route_avoided` reported a 0.0 km "detour" caused by a minor ploughing penalty. Fix: only detours of 1 km or more are reported.
+
+Still failing in round 2 (all verified against the data): a "newest update at 12:30" that the data gives as 10:30, the ploughing code `EKKI_MOKAD` ("not cleared") read as "not gritted", and Gemlufallsheiði presented as the only blocker when the tool lists it only as an example. Across all 51 runs the pattern checks also caught a "45 km" in an Icelandic answer that isn't in the data.
+
+**The two kinds of grading complement each other.** Pattern checks are free, run on every trial and catch exact errors such as an invented distance or a shifted time. The judge catches wrong route descriptions and misread warnings that no regex can, but it costs money, can be wrong, and its verdicts need spot-checking against the data.
 
 What the evals don't cover yet:
 - `typo_recovery` doesn't exercise recovery: the model fixes "akureyrii" itself before calling the tool. A misspelling that only the gazetteer's suggestion can resolve is needed.
-- Answers are checked by patterns, not judged as a whole. An answer can pass every check and still be misleading, or add claims that aren't in the data. An LLM judge scoring against a rubric would catch more.
-- Judgment on cases outside the data (recalled coordinates, general knowledge about roads). Grading that needs an LLM judge with a rubric; pattern checks can't see it.
+- Sonnet 5.5 hasn't been judged yet. The judge is the first grader that might separate it from Haiku.
+- The judge itself hasn't been checked against human grading beyond spot checks. A small set of hand-graded answers would show how often it is wrong.
+- The time-shift error persists at a low rate (2 of 45 runs in one round, before the "write times exactly as in the data" rule). Re-measure after that rule.
 
 ## Tests
 
 ```bash
-pytest                                              # 135 unit tests (synthetic network, fake model), ~4 s
+pytest                                              # 175 unit tests (synthetic network, fake model, fake judge), ~5 s
 ROADROUTE_GEOMETRY_XML=path/to/faerdferlar2017_1.xml pytest   # + 8 integration tests on the real data
 ```
 
@@ -181,7 +224,7 @@ Blocked for a standard car: `OFAERT_*`, `LOKAD`, `ALLUR_AKSTUR_BANN`, `FAERT_FJA
 
 ## Tool output
 
-`get_route_conditions` returns: `total_km`, `issues` (full detail only for segments that aren't plainly passable or have a restriction), `segments` as `[name, km, status]` rows in driving order, `data_as_of`, `shorter_route_blocked` when closures forced a detour, and `notes`. Errors are JSON `{"error": ...}` results so an agent can recover (e.g. retry with a suggested place name). A Reykjavík → Akureyri result is ~2,100 characters.
+`get_route_conditions` returns: `total_km`, `issues` (full detail only for segments that aren't plainly passable or have a restriction), `segments` as `[name, km, status]` rows in driving order, `data_as_of`, `shorter_route_blocked` when closures (or an axle limit below `max_axle_tonnes`) forced a detour, `shorter_route_avoided` when the route avoids open roads with unknown or poor conditions (detours of 1 km or more), and `notes`. Errors are JSON `{"error": ...}` results so an agent can recover (e.g. retry with a suggested place name). A Reykjavík → Akureyri result is ~2,100 characters.
 
 `registered_at` timestamps say when a condition was last *registered*. Vegagerðin updates a condition when it changes, so an old timestamp means "unchanged since", not necessarily "stale" — the tool reports the timestamps and doesn't judge.
 
@@ -213,14 +256,15 @@ src/roadroute/
   service.py     RoutePlanner: the compact result
   tools.py       tool schemas + Toolbox.call() that never raises
   cli.py         build / route / places
-src/roadroute_agent/
+src/erfaert/
   loop.py        the hand-written tool-use loop
   prompts.py     system prompt (constant, cacheable) + per-run time preamble
   config.py      model, effort, iteration cap, fallbacks
   usage.py       token accounting and cost estimate
-  cli.py         roadroute-agent "question"
+  cli.py         erfaert "question"
 evals/
   scenarios.py   questions, snapshot patches, checks per scenario
   graders.py     deterministic checks
+  judge.py       LLM judge: grade saved runs against a rubric
   run_evals.py   run against the real model, print table, save results
 ```

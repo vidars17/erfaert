@@ -9,6 +9,7 @@ the interpretation to the caller.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ class Condition:
     plow_rule: str | None
     registered_at: datetime | None  # DagsSkrad
     changed_at: datetime | None  # DagsButurBreyttist
+    axle_limit_t: float | None = None  # from AsthungiAudkenni, e.g. "5TONN" -> 5.0
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,19 @@ def _parse_time(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+_AXLE_CODE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*TONN\s*$", re.IGNORECASE)
+_AXLE_TEXT = re.compile(r"axle weight limit\s+(\d+(?:[.,]\d+)?)\s*t", re.IGNORECASE)
+
+
+def _parse_axle_limit(code: str | None, text_en: str | None) -> float | None:
+    """Axle weight limit in tonnes. Prefers the code ("5TONN"); falls back to the English text."""
+    for pattern, value in ((_AXLE_CODE, code), (_AXLE_TEXT, text_en)):
+        match = value and pattern.search(value)
+        if match:
+            return float(match.group(1).replace(",", "."))
+    return None
 
 
 def _record_fields(record: ET.Element) -> dict[str, str | None]:
@@ -117,6 +132,7 @@ def parse_conditions(xml: bytes | str) -> ConditionsSnapshot:
             plow_rule=f.get("Snjomokstursregla"),
             registered_at=_parse_time(f.get("DagsSkrad")),
             changed_at=_parse_time(f.get("DagsButurBreyttist")),
+            axle_limit_t=_parse_axle_limit(f.get("AsthungiAudkenni"), f.get("AsthungiLysingEn")),
         )
     if not by_segment:
         raise ConditionsError("conditions XML contained no usable records")

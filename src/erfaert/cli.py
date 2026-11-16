@@ -1,4 +1,4 @@
-"""roadroute-agent "Can I drive from Reykjavík to Akureyri?" """
+"""erfaert "Can I drive from Reykjavík to Akureyri?" """
 from __future__ import annotations
 
 import argparse
@@ -15,7 +15,7 @@ from .loop import Agent
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="roadroute-agent", description=__doc__)
+    parser = argparse.ArgumentParser(prog="erfaert", description=__doc__)
     parser.add_argument("question")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--effort", default="low", choices=["low", "medium", "high", "xhigh", "max"])
