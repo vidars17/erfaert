@@ -55,3 +55,13 @@ def test_side_roads_and_unploughed_roads_cost_more():
     unploughed = make_condition(S1, plow_rule="EKKI_MOKAD")
     assert STANDARD.multiplier("1", unploughed) == pytest.approx(2.0)
     assert STANDARD.multiplier("1", make_condition(S1, plow_rule="2X")) == 1.0
+
+
+def test_winter_codes_are_known_cautions():
+    """Codes from the live feed on 2026-11-20: penalised as cautions, not flagged as unknown."""
+    from builders import make_condition
+    from roadroute.costs import CAUTION, STANDARD
+    for code in ("HALKUBLETTIR", "HALKA", "SNJOTHEKJA", "KRAP", "FLUGHALT"):
+        cond = make_condition("1001", status=code)
+        assert STANDARD.kind(cond) == CAUTION, code
+        assert 1.0 < STANDARD.multiplier("1", cond) < STANDARD.status_multiplier["OTHEKKT"], code

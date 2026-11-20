@@ -156,7 +156,8 @@ def fetch_conditions(
     owns_client = client is None
     client = client or httpx.Client(timeout=timeout, follow_redirects=True)
     try:
-        response = client.get(url)
+        # The service negotiates content: without this header it answers in JSON.
+        response = client.get(url, headers={"Accept": "application/xml"})
         response.raise_for_status()
         return parse_conditions(response.content)
     except httpx.HTTPError as exc:

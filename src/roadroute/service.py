@@ -1,6 +1,7 @@
 """Plan a route and return a compact, model-friendly summary of conditions on it."""
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -9,6 +10,7 @@ from .costs import BLOCKED, OK, PROFILES
 from .gazetteer import Place
 from .network import OutsideNetworkError, RoadNetwork, to_isn93
 from .router import Route, shortest_route
+from .weather import PathPoint
 
 NO_DATA = "NO_DATA"
 # A start/end point is snapped to a road whose cost multiplier is below this, i.e. one
@@ -79,6 +81,57 @@ class RoutePlanner:
             self._direct[key] = shortest_route(self.network, a, b, [1.0] * len(self.network.seg_ids))
         return self._direct[key]
 
+    def _solve(self, origin: Place, destination: Place, vehicle: str, max_axle_tonnes: float | None):
+        model = PROFILES.get(vehicle)
+        if model is None:
+            raise ValueError(f"unknown vehicle profile {vehicle!r}; use one of {sorted(PROFILES)}")
+        if max_axle_tonnes is not None and not (0 < max_axle_tonnes <= 100):
+            raise ValueError("max_axle_tonnes must be a number of tonnes between 0 and 100")
+        model = model.for_axle_load(max_axle_tonnes)
+        snapshot = self._conditions()
+        multipliers = [model.multiplier(info.road_no, snapshot.get(info.id)) for info in self.network.seg_info]
+        start, start_gap = self._snap(origin, multipliers)
+        goal, goal_gap = self._snap(destination, multipliers)
+        route = shortest_route(self.network, start, goal, multipliers)
+        return model, snapshot, start, start_gap, goal, goal_gap, route
+
+    def route_path(
+        self,
+        origin: Place,
+        destination: Place,
+        vehicle: str = "standard",
+        max_axle_tonnes: float | None = None,
+    ) -> tuple[float, list[PathPoint]] | None:
+        """The same route plan() picks, as (total_km, geometry points); None if no route.
+
+        Used by the weather tool, so weather is reported along exactly the route whose road
+        conditions the other tool reports.
+        """
+        *_, route = self._solve(origin, destination, vehicle, max_axle_tonnes)
+        if route is None:
+            return None
+        net, snapshot = self.network, self._conditions()
+        points: list[PathPoint] = []
+        km, segment_name = 0.0, ""
+        for i, node in enumerate(route.nodes):
+            if i > 0:
+                seg = route.edge_segments[i - 1]
+                km += math.dist(net.nodes[route.nodes[i - 1]], net.nodes[node]) / 1000
+                if seg >= 0:
+                    info = net.seg_info[seg]
+                    cond = snapshot.get(info.id)
+                    segment_name = cond.name if cond else info.name
+            x, y = net.nodes[node]
+            points.append(PathPoint(x, y, km, segment_name))
+        # The first point takes the name of the first real segment.
+        first = next((p.segment for p in points if p.segment), "")
+        points = [PathPoint(p.x, p.y, p.km, p.segment or first) for p in points]
+        # Straight-line node distances under-count curvy roads; scale to the real length.
+        if points and points[-1].km > 0:
+            scale = route.length_m / 1000 / points[-1].km
+            points = [PathPoint(p.x, p.y, p.km * scale, p.segment) for p in points]
+        return round(route.length_m / 1000, 1), points
+
     def plan(
         self,
         origin: Place,
@@ -86,17 +139,9 @@ class RoutePlanner:
         vehicle: str = "standard",
         max_axle_tonnes: float | None = None,
     ) -> dict[str, Any]:
-        model = PROFILES.get(vehicle)
-        if model is None:
-            raise ValueError(f"unknown vehicle profile {vehicle!r}; use one of {sorted(PROFILES)}")
-        if max_axle_tonnes is not None and not (0 < max_axle_tonnes <= 100):
-            raise ValueError("max_axle_tonnes must be a number of tonnes between 0 and 100")
-        model = model.for_axle_load(max_axle_tonnes)
-        net, snapshot = self.network, self._conditions()
-        multipliers = [model.multiplier(info.road_no, snapshot.get(info.id)) for info in net.seg_info]
-        start, start_gap = self._snap(origin, multipliers)
-        goal, goal_gap = self._snap(destination, multipliers)
-        route = shortest_route(net, start, goal, multipliers)
+        net = self.network
+        model, snapshot, start, start_gap, goal, goal_gap, route = self._solve(
+            origin, destination, vehicle, max_axle_tonnes)
         direct = self._direct_route(start, goal)
 
         result: dict[str, Any] = {

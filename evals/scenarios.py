@@ -11,11 +11,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import json
+from datetime import timedelta
+
 from roadroute import ConditionsSnapshot, load_conditions
+from roadroute.weather import Observation, Station, parse_observations, parse_stations
 
 from graders import (
     Check,
     does_not_open_with_yes,
+    opens_with_yes,
     min_route_calls,
     no_route_to,
     finished,
@@ -26,10 +31,14 @@ from graders import (
     official_source,
     route_called_with,
     route_tool_succeeded,
+    tool_called,
     states_data_time,
 )
 
-SNAPSHOT_PATH = Path(__file__).resolve().parents[1] / "tests" / "data" / "faerd2017_1.snapshot.xml"
+DATA = Path(__file__).resolve().parents[1] / "tests" / "data"
+SNAPSHOT_PATH = DATA / "faerd2017_1.snapshot.xml"
+STATIONS_PATH = DATA / "vedur_stations.snapshot.json"
+OBSERVATIONS_PATH = DATA / "vedur_aws_10min_latest.snapshot.json"
 # Two hours after the snapshot was generated (13:11 UTC), a Friday.
 NOW = datetime(2026, 11, 6, 15, 0, tzinfo=timezone.utc)
 
@@ -74,9 +83,29 @@ class Scenario:
     patch: Patch | None = None
     note: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
+    weather_patch: "WeatherPatch | None" = None
 
     def conditions(self, base: ConditionsSnapshot) -> ConditionsSnapshot:
         return self.patch(base) if self.patch else base
+
+    def weather(self, base: dict[int, Observation]) -> dict[int, Observation]:
+        return self.weather_patch(base) if self.weather_patch else base
+
+
+WeatherPatch = Callable[[dict[int, Observation]], dict[int, Observation]]
+
+# Weather station ids (Vegagerðin road stations).
+STATION_HOLTAVORDUHEIDI = 32097
+
+
+def set_observations(changes: dict[int, dict]) -> WeatherPatch:
+    def patch(observations: dict[int, Observation]) -> dict[int, Observation]:
+        out = dict(observations)
+        for station_id, fields in changes.items():
+            out[station_id] = replace(out[station_id], **fields)
+        return out
+
+    return patch
 
 
 # Checks every route answer should pass.
@@ -86,8 +115,10 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         "clear_route",
         "Can I drive from Reykjavík to Akureyri right now?",
-        CORE,
-        note="Every segment GREIDFAERT. The baseline.",
+        CORE + [opens_with_yes()],
+        note="Every segment GREIDFAERT, ordinary car. The baseline. Ice is possible on the passes "
+             "and gusts near Kjalarnes reach 15-16 m/s, which matters for high-sided vehicles, "
+             "not for a car: the answer should still be yes, with caveats.",
         tags=("happy-path",),
     ),
     Scenario(
@@ -147,7 +178,7 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         "icelandic_question",
         "Er fært frá Reykjavík til Akureyrar núna?",
-        CORE + [mentions("answers in Icelandic", r"\b(fært|já|leiðin|vegurinn|greiðfært|færð)\b")],
+        CORE + [mentions("answers in Icelandic", r"\b(fært|já|ja|leiðin|vegurinn|greiðfært|greiðfær|færð|færðin|hálka)\b")],
         note="Answer in the language of the question; Akureyrar is the genitive of Akureyri.",
         tags=("language",),
     ),
@@ -162,6 +193,7 @@ HARD: list[Scenario] = [
         "several_cautions",
         "Driving Reykjavík to Akureyri this afternoon in a camper van. Anything I should know?",
         CORE + [
+            does_not_open_with_yes(),
             mentions("mentions the wind warning", r"wind|gust|vind"),
             mentions("mentions the tunnel height limit", r"height|4[.,]2|hæð"),
             mentions("mentions the icy stretch", r"ic[ey]|slippery|hálk|hál"),
@@ -240,8 +272,49 @@ HARD: list[Scenario] = [
     ),
 ]
 
-SCENARIOS = SCENARIOS + HARD
+WEATHER: list[Scenario] = [
+    Scenario(
+        "storm_on_the_pass",
+        "Driving from Reykjavík to Akureyri in a camper van right now. OK?",
+        CORE + [tool_called("get_route_weather"),
+                does_not_open_with_yes(),
+                mentions("names the windy pass", r"Holtavörðu|Holtavordu"),
+                mentions("reports the gusts", r"3[0-9] m/s|gust|hviður|vindhviður"),
+                mentions("warns the camper van", r"camper|high-sided|van|húsbíl")],
+        weather_patch=set_observations({STATION_HOLTAVORDUHEIDI: {"wind_ms": 24.0, "gust_ms": 33.0, "wind_from": "NE"}}),
+        note="Road status is GREIDFAERT everywhere, but the Holtavörðuheiði station reports 33 m/s gusts "
+             "(patched in). Only the weather tool shows it.",
+        tags=("weather", "safety"),
+    ),
+    Scenario(
+        "ice_possible",
+        "Is the road slippery between Reykjavík and Akureyri right now?",
+        CORE + [tool_called("get_route_weather"),
+                mentions("says ice is possible", r"ice|icy|slippery|hálka|hál"),
+                mentions("hedges: possible, not certain", r"possib|may|might|risk|could|likely")],
+        note="Unpatched weather: road surface at or below 0 °C at most road stations. The road "
+             "status doesn't say slippery; the weather does, as a possibility.",
+        tags=("weather",),
+    ),
+]
+
+SCENARIOS = SCENARIOS + HARD + WEATHER
 
 
 def load_base_snapshot() -> ConditionsSnapshot:
     return load_conditions(SNAPSHOT_PATH)
+
+
+def load_stations() -> list[Station]:
+    return parse_stations(json.loads(STATIONS_PATH.read_text(encoding="utf-8")))
+
+
+def load_base_observations() -> dict[int, Observation]:
+    """The committed observations (2026-11-20), moved in time so the newest is 5 minutes before NOW.
+
+    The road snapshot and the weather snapshot were downloaded two weeks apart; shifting keeps
+    them consistent with the eval clock. This is a modification of the data (see DATA_LICENSE.md).
+    """
+    observations = parse_observations(json.loads(OBSERVATIONS_PATH.read_text(encoding="utf-8")))
+    shift = NOW - timedelta(minutes=5) - max(o.time for o in observations.values())
+    return {sid: replace(o, time=o.time + shift) for sid, o in observations.items()}

@@ -75,6 +75,17 @@ def test_fetch_conditions_parses_the_response():
     assert len(fetch_conditions("http://example.test/feed", client=client)) == 1
 
 
+def test_fetch_conditions_asks_for_xml():
+    """The live service returns JSON unless asked for XML (found on the first live run)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("accept") != "application/xml":
+            return httpx.Response(200, json=[{"IdButur": 1.0}])
+        return httpx.Response(200, content=MINIMAL.encode("utf-8"))
+
+    assert len(fetch_conditions("http://example.test/feed", client=_client(handler))) == 1
+
+
 def test_fetch_conditions_wraps_http_errors():
     client = _client(lambda request: httpx.Response(503))
     with pytest.raises(ConditionsError, match="could not fetch"):

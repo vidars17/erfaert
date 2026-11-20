@@ -19,6 +19,10 @@ class Route:
     legs: tuple[Leg, ...]
     length_m: float  # real distance, independent of the cost multipliers
     cost: float  # weighted cost the search minimised
+    # The path as visited nodes, and the segment index of each edge between them (JOIN for
+    # snap joins). Lets callers walk the route geometry, e.g. to find weather stations on it.
+    nodes: tuple[int, ...] = ()
+    edge_segments: tuple[int, ...] = ()
 
 
 def shortest_route(
@@ -33,7 +37,7 @@ def shortest_route(
     Returns ``None`` when the goal cannot be reached under those rules.
     """
     if start == goal:
-        return Route((), 0.0, 0.0)
+        return Route((), 0.0, 0.0, (start,), ())
     adj = network.adj
     best = {start: 0.0}
     came: dict[int, tuple[int, int, float]] = {}  # node -> (previous node, segment, edge length)
@@ -61,12 +65,15 @@ def shortest_route(
         return None
 
     edges: list[tuple[int, float]] = []
+    path = [goal]
     node = goal
     while node != start:
         previous, seg, length = came[node]
         edges.append((seg, length))
+        path.append(previous)
         node = previous
     edges.reverse()
+    path.reverse()
 
     legs: list[Leg] = []
     for seg, length in edges:
@@ -76,4 +83,10 @@ def shortest_route(
             legs[-1] = Leg(seg, legs[-1].length_m + length)
         else:
             legs.append(Leg(seg, length))
-    return Route(tuple(legs), sum(length for _, length in edges), best[goal])
+    return Route(
+        tuple(legs),
+        sum(length for _, length in edges),
+        best[goal],
+        tuple(path),
+        tuple(seg for seg, _ in edges),
+    )

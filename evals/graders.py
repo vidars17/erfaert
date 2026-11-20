@@ -178,6 +178,17 @@ def does_not_open_with_yes() -> Check:
     return Check("does_not_open_with_yes", fn)
 
 
+def opens_with_yes() -> Check:
+    """For a plain 'yes' case: guards against over-caution (every answer turning into a no)."""
+
+    def fn(r: AgentResult) -> tuple[bool, str]:
+        opening = re.sub(r"^[\s*_#>]+", "", r.answer)[:40]
+        ok = re.match(r"(yes|já|ja)\b", opening, re.IGNORECASE)
+        return bool(ok), f"opens with {opening!r}"
+
+    return Check("opens_with_yes", fn)
+
+
 def route_called_with(name: str, key: str, expected: float, tolerance: float = 0.01) -> Check:
     """Some successful route lookup was made with arguments[key] == expected (numeric)."""
 
@@ -187,3 +198,13 @@ def route_called_with(name: str, key: str, expected: float, tolerance: float = 0
         return ok, f"{key} values passed: {seen}"
 
     return Check(name, fn)
+
+
+def tool_called(tool: str) -> Check:
+    """The named tool ran successfully at least once."""
+
+    def fn(r: AgentResult) -> tuple[bool, str]:
+        ok = any(c.name == tool and not c.is_error for c in r.tool_calls)
+        return ok, f"{tool} called" if ok else f"{tool} not called (tools: {[c.name for c in r.tool_calls]})"
+
+    return Check(f"called_{tool}", fn)

@@ -1,9 +1,10 @@
 """Turn a segment's condition into an edge-cost multiplier for routing.
 
 Everything numeric here is a *heuristic starting point*, not Vegagerðin
-policy. The status vocabulary below is what appears in the feed today
-(GREIDFAERT, OTHEKKT, EKKI_I_THJONUSTU, OFAERT_ANNAD, OFAERT_VEDUR,
-FAERT_FJALLABILUM, LOKAD, plus the secondary code ALLUR_AKSTUR_BANN).
+policy. The status vocabulary below is what has appeared in the feed so far
+(GREIDFAERT, the winter codes HALKUBLETTIR, HALKA, SNJOTHEKJA, KRAP, FLUGHALT,
+OTHEKKT, EKKI_I_THJONUSTU, OFAERT_ANNAD, OFAERT_VEDUR, FAERT_FJALLABILUM, LOKAD,
+plus the secondary code ALLUR_AKSTUR_BANN).
 Unrecognised codes are never silently treated as fine: they get a penalty and
 are reported as "unknown" so a new code shows up in the tool output.
 """
@@ -18,6 +19,13 @@ OK, CAUTION, BLOCKED, UNKNOWN = "ok", "caution", "blocked", "unknown"
 
 _STATUS_MULTIPLIER = {
     "GREIDFAERT": 1.0,        # easily passable
+    # Winter codes, first seen in the live feed on 2026-11-20. Modest penalties: on an ordinary
+    # winter day most main roads carry one of these, and the route should stay on them.
+    "HALKUBLETTIR": 1.15,     # spots of ice
+    "HALKA": 1.3,             # slippery
+    "SNJOTHEKJA": 1.5,        # snow
+    "KRAP": 1.5,              # wet snow / slush
+    "FLUGHALT": 2.5,          # extremely slippery
     "OTHEKKT": 3.0,           # condition not known
     "EKKI_I_THJONUSTU": 8.0,  # not in service; avoid unless nothing else reaches
 }

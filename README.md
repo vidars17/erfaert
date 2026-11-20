@@ -81,6 +81,56 @@ Each run prints the answer, then the tools used, token counts (read from the API
 - The dependency points one way: the agent imports the tools; the tools know nothing about the agent.
 - One repo, because the two change together (a tool output change usually needs a prompt change) and there is only one consumer. Splitting into two repos would add versioning work with no benefit yet.
 
+## Weather along the route (`get_route_weather`)
+
+A second tool reports the latest observations from automatic weather stations along the same route, from Veðurstofa Íslands (the Icelandic Met Office) at [api.vedur.is/weather](https://api.vedur.is/weather/). About 110 of the stations belong to Vegagerðin and sit on the roads themselves, many on the passes (Holtavörðuheiði, Öxnadalsheiði, Brattabrekka, Gemlufallsheiði). They also measure road surface temperature, which is what matters for ice.
+
+How it works (`src/roadroute/weather.py`):
+- **Two API calls cover the whole country.** `/stations?active=true` lists every station with coordinates (cached 24 h). `/observations/aws/10min/latest` returns the latest 10-minute reading from every automatic station in one ~160 KB response, in about 0.2 s (cached 5 min).
+- **Stations are matched to the route locally**, not by API region. The route geometry is sampled every kilometre, and the nearest station within 6 km of each sample is kept. The API's 12 forecast regions are far bigger than a mountain pass, so coordinates are more precise.
+- **The same route as the conditions tool.** `RoutePlanner.route_path` reuses the solver behind `get_route_conditions`, so the weather is always for the road the user would actually drive.
+- **Compact output (~900 tokens).** A summary comes first: how many stations show possible ice and between which kilometres, the coldest road surface, the strongest gust, and gust warnings. Then up to 14 station rows (capped: gust warnings first, then road stations spread along the route).
+- **Flags are heuristics.** "Ice possible" means a road surface at or below 0 °C, or, with no road sensor, air between -3 and 2 °C at 90% humidity or more. Gust warnings are at 15 m/s (high-sided vehicles, trailers) and 25 m/s (all vehicles). These thresholds are mine, not official guidance.
+- **Observations, not a forecast.** Readings over 2 hours old are left out and counted in `notes`.
+
+The agent calls both tools in the same turn, and the loop runs them in parallel. Turn the weather tool off with `erfaert --no-weather` or `run_evals.py --no-weather`.
+
+**What the first live run found.** Until now, only saved snapshots had been tested. The first fully live run turned up two things:
+- **Vegagerðin's service negotiates content.** With httpx's default `Accept: */*` it answers in JSON, not XML. The agent got an error on every call and correctly refused to say the road was open. Fix: send `Accept: application/xml`, with a test that fails if the header goes missing.
+- **Winter codes.** The November snapshot had only a handful of statuses. The live feed on 2026-11-20 used `HALKA` (slippery, 208 segments), `HALKUBLETTIR` (spots of ice, 145), `SNJOTHEKJA` (snow), `KRAP` (wet snow) and `FLUGHALT` (extremely slippery). The cost model treated them as unknown codes (penalised and flagged, so nothing was silently trusted). They're now known cautions with modest penalties, so routes stay on the main roads on an ordinary winter day.
+
+### Evals with weather
+
+Two new scenarios use the weather snapshot (times moved to match the eval clock): `storm_on_the_pass` (33 m/s gusts patched in at Holtavörðuheiði, camper van) and `ice_possible`.
+
+| Run (Haiku 5.5, 19 scenarios x 3) | Passed | Tokens per run | Cost per run |
+|---|---|---|---|
+| Without weather (earlier, 17 scenarios) | 50/51 | 5,400 in / 530 out | $0.0005 |
+| With weather, first try | 55/57 | 8,400 in / 830 out | $0.0008 |
+| With weather, prompt fixed | 56/57 | 8,900 in / 910 out | $0.0009 |
+| Road-note warnings, new checks (below) | 55/57, then 20/20 on the affected scenarios | 9,100 in / 880 out | $0.0008 |
+
+The model called the weather tool in 54 of 57 runs; the three without it were the scenarios with no route (Tórshavn, Hveravellir).
+
+**The checks passed while the answers were unsafe.** On the first try, all three storm answers opened with "Yes, with caveats" for a camper van facing gusts the tool itself labelled "dangerous for all vehicles": the road was open, so the model said yes. One camper-van answer also dropped the tunnel's 4.2 m height limit, crowded out by weather details. Fixes:
+- A prompt rule: open roads and safe driving are different. If a gust warning applies to the user's vehicle, the answer is "not advisable right now".
+- A rule to mention every restriction that applies to the vehicle.
+- A new `does_not_open_with_yes` check on the storm scenario.
+
+After the fix, all three storm answers open with "Not advisable right now", and all three camper-van answers mention the height limit.
+
+**Road-data warnings got the same treatment.** In `several_cautions`, the road data itself notes that Holtavörðuheiði is "not suitable for high-sided vehicles", yet camper-van answers still opened with "Yes, with caveats" (3 of 5 runs passed once a `does_not_open_with_yes` check was added). The model applied the new rule to weather warnings but not to road notes. Fixes:
+- The prompt now names road notes and restrictions (`issues[].notes`, `issues[].restriction`) explicitly, and lists which vehicles count as high-sided.
+- To guard against overshooting, `clear_route` (an ordinary car, with gust warnings that only matter for high-sided vehicles) gained an `opens_with_yes` check. A fix that turned every answer into a no would fail it.
+
+Result: 10 of 10 on those two scenarios, with camper-van answers opening "Not advisable right now for a camper van" and car answers still opening "Yes, with caveats".
+
+The full regression run then showed answers about "Thorshofn" that routed correctly to Þórshöfn but never named the town (2 of 3), leaving the user to guess between Þórshöfn and Tórshavn. A rule to name the places as the tool resolved them brought that to 20 of 20 across the four affected scenarios.
+
+Still open:
+- The weather tool needs the road conditions feed to plan the route. If that feed is down, weather fails too, although it could still be reported along an unweighted route.
+- Weather runs haven't been through the LLM judge yet.
+
 ## Evals (`evals/`)
 
 Unit tests check the loop's mechanics against a scripted fake model (`tests/test_agent_loop.py`, free, run with `pytest`). Evals check whether the **real model** behaves well, cost money, and are run on purpose:
@@ -198,7 +248,7 @@ What the evals don't cover yet:
 ## Tests
 
 ```bash
-pytest                                              # 175 unit tests (synthetic network, fake model, fake judge), ~5 s
+pytest                                              # 197 unit tests (synthetic network, fake model, fake judge, mocked APIs), ~5 s
 ROADROUTE_GEOMETRY_XML=path/to/faerdferlar2017_1.xml pytest   # + 8 integration tests on the real data
 ```
 
@@ -218,7 +268,7 @@ Unit tests need no network or data files. Integration tests use the committed co
 
 ## Cost model (`costs.py`)
 
-Blocked for a standard car: `OFAERT_*`, `LOKAD`, `ALLUR_AKSTUR_BANN`, `FAERT_FJALLABILUM` (allowed with `vehicle="4x4"`). Penalised: `OTHEKKT` ×3, `EKKI_I_THJONUSTU` ×8, unrecognised status codes ×2 (and flagged `unknown` in the output, so a new code is visible rather than silently trusted), roads not ploughed ×2, side roads (road no. ≥ 100) ×1.1.
+Blocked for a standard car: `OFAERT_*`, `LOKAD`, `ALLUR_AKSTUR_BANN`, `FAERT_FJALLABILUM` (allowed with `vehicle="4x4"`). Penalised: winter codes `HALKUBLETTIR` ×1.15, `HALKA` ×1.3, `SNJOTHEKJA` and `KRAP` ×1.5, `FLUGHALT` ×2.5; `OTHEKKT` ×3, `EKKI_I_THJONUSTU` ×8, unrecognised status codes ×2 (and flagged `unknown` in the output, so a new code is visible rather than silently trusted), roads not ploughed ×2, side roads (road no. ≥ 100) ×1.1.
 
 **These multipliers are heuristics I chose, not Vegagerðin policy.** They are tuned only by the tests above; adjust them in `CostModel` if the routes look wrong to you.
 
@@ -230,8 +280,8 @@ Blocked for a standard car: `OFAERT_*`, `LOKAD`, `ALLUR_AKSTUR_BANN`, `FAERT_FJA
 
 ## Known limitations
 
-- **Current conditions only.** No forecast. Pair with a weather tool for "tomorrow".
-- **The live feed fetch is only tested against a mock server.** The URL in `conditions.py` comes from Vegagerðin's 2019 documentation and matches the downloaded snapshot, but no automated test calls it live.
+- **Current conditions only.** No forecast: the weather tool reports observations, not what the weather will do.
+- **Live feeds are checked by hand, not by automated tests.** Both feeds worked in a live run on 2026-11-20. The automated tests use mock servers and saved snapshots.
 - **Distances run slightly short** of familiar driving figures (Reykjavík → Akureyri comes out at ~380 km; I remember ~390 km but did not verify against a map). I haven't pinned down why.
 - **Gazetteer coordinates are approximate** (~60 towns, hand-entered). The integration test checks each lands within 3 km of a mapped road, not that it sits on the right street.
 - **Not turn-by-turn navigation**, no travel times, no ferries, no one-way or turn restrictions.
@@ -239,7 +289,7 @@ Blocked for a standard car: `OFAERT_*`, `LOKAD`, `ALLUR_AKSTUR_BANN`, `FAERT_FJA
 
 ## Data licence
 
-Road data: **Vegagerðin**, datasets `faerd2017_1` (road conditions; downloaded 2026-11-06) and `faerdferlar2017_1` (segment geometry; downloaded November 2026), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). `data/network.json.gz` is derived from the geometry, and the eval scenarios change the conditions data to create fictional test cases. [DATA_LICENSE.md](DATA_LICENSE.md) lists every change. This project is not affiliated with or endorsed by Vegagerðin.
+Road data: **Vegagerðin**, datasets `faerd2017_1` (road conditions; downloaded 2026-11-06) and `faerdferlar2017_1` (segment geometry; downloaded November 2026), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). `data/network.json.gz` is derived from the geometry, and the eval scenarios change the conditions data to create fictional test cases. [DATA_LICENSE.md](DATA_LICENSE.md) lists every change. Weather: **Veðurstofa Íslands**, station list and observations from api.vedur.is (CC BY 4.0). This project is not affiliated with or endorsed by Vegagerðin or Veðurstofa Íslands.
 
 The raw geometry export isn't in the repo (12.9 MB). To rebuild the network or run the integration tests, download layer `gis:faerdferlar2017_1` from Vegagerðin's GeoServer at `http://gagnaveita.vegagerdin.is/geoserver` (WFS).
 
@@ -254,6 +304,7 @@ src/roadroute/
   router.py      Dijkstra with per-segment multipliers
   gazetteer.py   place names → coordinates (accent-insensitive, typo suggestions)
   service.py     RoutePlanner: the compact result
+  weather.py     vedur.is client, stations along the route, ice and gust flags
   tools.py       tool schemas + Toolbox.call() that never raises
   cli.py         build / route / places
 src/erfaert/

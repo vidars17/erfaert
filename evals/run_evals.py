@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from roadroute import RoadNetwork, RoutePlanner, Toolbox  # noqa: E402
 from erfaert import Agent, AgentConfig  # noqa: E402
 from erfaert.config import DEFAULT_MODEL  # noqa: E402
-from scenarios import NOW, SCENARIOS, load_base_snapshot  # noqa: E402
+from roadroute.weather import RouteWeather  # noqa: E402
+from scenarios import NOW, SCENARIOS, load_base_observations, load_base_snapshot, load_stations  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -36,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trials", type=int, default=1, help="runs per scenario (models are not deterministic)")
     parser.add_argument("--only", nargs="*", help="scenario ids or tags to run")
     parser.add_argument("--network", default=str(ROOT / "data" / "network.json.gz"))
+    parser.add_argument("--no-weather", action="store_true", help="run without the weather tool")
     parser.add_argument("--dry-run", action="store_true", help="list the scenarios and exit")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
@@ -58,12 +60,17 @@ def main(argv: list[str] | None = None) -> int:
     client = anthropic.Anthropic()
     network = RoadNetwork.load(args.network)
     base = load_base_snapshot()
+    stations, base_weather = load_stations(), load_base_observations()
     config = AgentConfig(model=args.model, effort=args.effort)
 
     records = []
     for scenario in scenarios:
         snapshot = scenario.conditions(base)
-        toolbox = Toolbox(RoutePlanner(network, lambda s=snapshot: s))
+        weather = None
+        if not args.no_weather:
+            observations = scenario.weather(base_weather)
+            weather = RouteWeather(lambda: stations, lambda o=observations: o, clock=lambda: NOW)
+        toolbox = Toolbox(RoutePlanner(network, lambda s=snapshot: s), weather=weather)
         agent = Agent(client, toolbox, config, clock=lambda: NOW)
         for trial in range(1, args.trials + 1):
             try:
@@ -105,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = RESULTS_DIR / f"{stamp}-{args.model}-{args.effort}.json"
+    suffix = "-noweather" if args.no_weather else ""
+    out = RESULTS_DIR / f"{stamp}-{args.model}-{args.effort}{suffix}.json"
     out.write_text(json.dumps({
         "model": args.model, "effort": args.effort, "trials": args.trials,
         "passed_runs": passed_runs, "runs": runs, "cost_usd": round(total_cost, 6),
