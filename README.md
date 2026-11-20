@@ -131,6 +131,42 @@ Still open:
 - The weather tool needs the road conditions feed to plan the route. If that feed is down, weather fails too, although it could still be reported along an unweighted route.
 - Weather runs haven't been through the LLM judge yet.
 
+## Forecasts for a planned trip (`get_route_forecast`)
+
+Asked "can I drive to Akureyri on Monday?", the agent used to give today's conditions and point to vedur.is. A third tool now gives the forecast along the route for a planned departure.
+
+**Source.** The observation API has no forecasts, but the Met Office's older station forecast service at `xmlweather.vedur.is` (`type=forec`) does: point forecasts per station, hourly for about two days, then every 3 to 6 hours, up to about 10 days ahead. It uses the same station ids as the observation API, so the route-matching code carries over unchanged. The Met Office's [terms](https://en.vedur.is/about-imo/the-web/conditions) allow free use of its data, forecasts included, if the Met Office and the download date are cited and any changes are stated clearly.
+
+**How it works** (`src/roadroute/forecast.py`):
+- The agent passes `departure_time`, working it out from the current date it was given. With a day but no hour, it uses 09:00 and says so.
+- The tool plans the same route, picks up to 12 stations along it, and estimates when the driver reaches each one (70 km/h average, no stops). Each station gets its forecast for that hour: a driver leaving Reykjavík at 08:00 gets Holtavörðuheiði's forecast for 10:00.
+- Up to 20 stations per request; each station's forecast is cached for 30 minutes.
+- Output (~2,600 characters): a summary (estimated arrival, wind warnings, where ice is possible and where snow or sleet is likely), when the forecast was issued, and one row per station.
+- A departure in the past, or beyond the forecast's range, comes back as a clear error.
+
+**What it can't do**, and the result's notes say so:
+- **Road status can't be forecast.** Vegagerðin publishes current conditions only, so the agent says what the weather is expected to be, never that the roads will be open.
+- **Mean wind only, no gusts, no road surface temperature.** Wind warnings sit lower than for observations (13 and 20 m/s mean wind), and ice is estimated from air temperature (-3 to 2 °C). These are this project's heuristics.
+- **Forecasts get less reliable further ahead.** More than about 3 days out, the agent says the forecast is likely to change.
+
+**A station-choice bug found on the way.** Both weather tools thin long station lists to an even spread. The helper stepped by `len/n` and never reached the last station, so Öxnadalsheiði, the pass nearest Akureyri, was always dropped. It now always includes both ends and keeps the highest stations (the passes) first, in both tools.
+
+### Evals with forecasts
+
+The committed forecast (issued 2026-11-20 12:00) is moved exactly 14 days back for the evals, so it is issued at 12:00 on the eval's Friday and "Monday" is 2026-11-09.
+- `future_time` ("Vík tomorrow morning") now expects a forecast for 2026-11-07.
+- `monday_trip` expects a forecast for Monday, a note on how far ahead it is, and no promise that the roads will be open.
+- `monday_storm` has an invented storm (mean wind 24 m/s, snow) at Holtavörðuheiði on Monday morning. With a departure at 08:00, the tool reports it at 10:00, and the answer must not open with yes.
+- Every scenario now also checks that warning levels are never called "official", a mistake seen in a live run.
+
+| Run (Haiku 5.5, 21 scenarios x 3) | Passed | Tokens per run | Cost per run |
+|---|---|---|---|
+| First run | 56/63 | 11,000 in / 920 out | $0.0010 |
+| Re-graded with fixed checks | 62/63 | | |
+| Prompt trimmed | 63/63 | 11,100 in / 920 out | $0.0010 |
+
+**Six of the seven first-run failures were the grader's fault.** The "never official" and "doesn't promise open roads" checks were plain regexes, so they failed answers saying "this is a heuristic, not an official warning" and "I can't say the roads will be open on Monday". They now use `not_claims`, which ignores negated sentences. The model had also over-corrected, adding a "not official" disclaimer to nearly every warning; the prompt now asks for at most one short note. The seventh failure was real: a lorry answer that never mentioned the detour around Svínvetningabraut's 5-tonne limit. It passed in the next run, but it was a single miss in 3 trials, so it may come back.
+
 ## Evals (`evals/`)
 
 Unit tests check the loop's mechanics against a scripted fake model (`tests/test_agent_loop.py`, free, run with `pytest`). Evals check whether the **real model** behaves well, cost money, and are run on purpose:
@@ -248,7 +284,7 @@ What the evals don't cover yet:
 ## Tests
 
 ```bash
-pytest                                              # 197 unit tests (synthetic network, fake model, fake judge, mocked APIs), ~5 s
+pytest                                              # 221 unit tests (synthetic network, fake model, fake judge, mocked APIs), ~5 s
 ROADROUTE_GEOMETRY_XML=path/to/faerdferlar2017_1.xml pytest   # + 8 integration tests on the real data
 ```
 
@@ -280,7 +316,7 @@ Blocked for a standard car: `OFAERT_*`, `LOKAD`, `ALLUR_AKSTUR_BANN`, `FAERT_FJA
 
 ## Known limitations
 
-- **Current conditions only.** No forecast: the weather tool reports observations, not what the weather will do.
+- **Road status is current only.** The forecast tool forecasts the weather, not whether roads will be open.
 - **Live feeds are checked by hand, not by automated tests.** Both feeds worked in a live run on 2026-11-20. The automated tests use mock servers and saved snapshots.
 - **Distances run slightly short** of familiar driving figures (Reykjavík → Akureyri comes out at ~380 km; I remember ~390 km but did not verify against a map). I haven't pinned down why.
 - **Gazetteer coordinates are approximate** (~60 towns, hand-entered). The integration test checks each lands within 3 km of a mapped road, not that it sits on the right street.
@@ -304,7 +340,8 @@ src/roadroute/
   router.py      Dijkstra with per-segment multipliers
   gazetteer.py   place names → coordinates (accent-insensitive, typo suggestions)
   service.py     RoutePlanner: the compact result
-  weather.py     vedur.is client, stations along the route, ice and gust flags
+  weather.py     vedur.is observations, stations along the route, ice and gust flags
+  forecast.py    xmlweather.vedur.is forecasts at each station's arrival time
   tools.py       tool schemas + Toolbox.call() that never raises
   cli.py         build / route / places
 src/erfaert/

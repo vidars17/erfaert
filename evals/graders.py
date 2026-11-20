@@ -208,3 +208,35 @@ def tool_called(tool: str) -> Check:
         return ok, f"{tool} called" if ok else f"{tool} not called (tools: {[c.name for c in r.tool_calls]})"
 
     return Check(f"called_{tool}", fn)
+
+
+def forecast_departure_on(day: str) -> Check:
+    """get_route_forecast ran successfully with a departure_time starting with ``day``."""
+
+    def fn(r: AgentResult) -> tuple[bool, str]:
+        seen = [str(c.input.get("departure_time")) for c in r.tool_calls
+                if c.name == "get_route_forecast" and not c.is_error]
+        ok = any(v.startswith(day) for v in seen)
+        return ok, f"departures passed: {seen}"
+
+    return Check(f"forecast_departure_on_{day}", fn)
+
+
+_NEGATION = re.compile(r"\b(not|no|never|cannot|can't|can’t|unable|isn't|aren't|won't|don't)\b|n't\b", re.IGNORECASE)
+
+
+def not_claims(name: str, pattern: str) -> Check:
+    """Fails only if a sentence asserts the pattern; sentences that negate it are fine.
+
+    A plain regex can't tell "the roads will be open" from "I can't say the roads will be open",
+    or "an official warning" from "not an official warning". The first version of these checks
+    failed seven correct answers that way.
+    """
+
+    def fn(r: AgentResult) -> tuple[bool, str]:
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", r.answer):
+            if re.search(pattern, sentence, re.IGNORECASE) and not _NEGATION.search(sentence):
+                return False, f"asserted: {sentence.strip()[:120]!r}"
+        return True, "not asserted"
+
+    return Check(name, fn)

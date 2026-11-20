@@ -22,5 +22,5 @@ SOFTWARE.
 
 The MIT License covers the source code only. The road data in this repository
 (tests/data/faerd2017_1.snapshot.xml, data/network.json.gz and data derived from
-them) comes from Vegagerðin, and the weather data (tests/data/vedur_*.snapshot.json)
-from Veðurstofa Íslands, both under CC BY 4.0. See DATA_LICENSE.md.
+them) comes from Vegagerðin, and the weather data (tests/data/vedur_*.snapshot.*)
+from Veðurstofa Íslands, under CC BY 4.0 and the Met Office's terms. See DATA_LICENSE.md.

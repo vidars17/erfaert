@@ -101,3 +101,15 @@ def test_no_route_to():
 def test_does_not_open_with_yes(answer, ok):
     from graders import does_not_open_with_yes
     assert does_not_open_with_yes()(run(answer))[0] is ok
+
+
+@pytest.mark.parametrize("answer, ok", [
+    ("The roads will be open on Monday.", False),
+    ("Road status cannot be forecast, so I can't say the roads will be open on Monday.", True),
+    ("This is a heuristic, not an official warning.", True),
+    ("Holtavörðuheiði has an official warning for wind.", False),
+])
+def test_not_claims_ignores_negated_sentences(answer, ok):
+    from graders import not_claims
+    check = not_claims("x", r"roads? will be open|official (warning|threshold)s?")
+    assert check(run(answer))[0] is ok

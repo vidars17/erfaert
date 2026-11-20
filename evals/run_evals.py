@@ -23,8 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from roadroute import RoadNetwork, RoutePlanner, Toolbox  # noqa: E402
 from erfaert import Agent, AgentConfig  # noqa: E402
 from erfaert.config import DEFAULT_MODEL  # noqa: E402
+from roadroute.forecast import RouteForecast  # noqa: E402
 from roadroute.weather import RouteWeather  # noqa: E402
-from scenarios import NOW, SCENARIOS, load_base_observations, load_base_snapshot, load_stations  # noqa: E402
+from scenarios import (NOW, SCENARIOS, load_base_forecasts, load_base_observations,  # noqa: E402
+                       load_base_snapshot, load_stations)
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -60,17 +62,20 @@ def main(argv: list[str] | None = None) -> int:
     client = anthropic.Anthropic()
     network = RoadNetwork.load(args.network)
     base = load_base_snapshot()
-    stations, base_weather = load_stations(), load_base_observations()
+    stations, base_weather, base_forecasts = load_stations(), load_base_observations(), load_base_forecasts()
     config = AgentConfig(model=args.model, effort=args.effort)
 
     records = []
     for scenario in scenarios:
         snapshot = scenario.conditions(base)
-        weather = None
+        weather = forecast = None
         if not args.no_weather:
             observations = scenario.weather(base_weather)
             weather = RouteWeather(lambda: stations, lambda o=observations: o, clock=lambda: NOW)
-        toolbox = Toolbox(RoutePlanner(network, lambda s=snapshot: s), weather=weather)
+            fcs = scenario.forecasts(base_forecasts)
+            forecast = RouteForecast(lambda: stations, lambda ids, f=fcs: {i: f[i] for i in ids if i in f},
+                                     clock=lambda: NOW)
+        toolbox = Toolbox(RoutePlanner(network, lambda s=snapshot: s), weather=weather, forecast=forecast)
         agent = Agent(client, toolbox, config, clock=lambda: NOW)
         for trial in range(1, args.trials + 1):
             try:

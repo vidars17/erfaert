@@ -43,6 +43,14 @@ The source code is licensed separately (see `LICENSE`). This file covers the dat
 - **In this repository:** `tests/data/vedur_aws_10min_latest.snapshot.json`, the downloaded file, unchanged apart from its name. At runtime the observations are downloaded and cached for 5 minutes.
 - **Licence:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
+### 5. Weather forecasts: `xmlweather.vedur.is`
+
+- **Licensor:** Veðurstofa Íslands
+- **Dataset:** station forecasts (`type=forec`, hourly where available) for temperature, mean wind, wind direction, weather and precipitation
+- **Downloaded:** 2026-11-20 (forecast issued 12:00 UTC that day)
+- **In this repository:** `tests/data/vedur_forecasts.snapshot.xml`, one downloaded response for the stations along the eval routes, unchanged apart from its name. At runtime, forecasts are downloaded for the stations along the requested route and cached for 30 minutes.
+- **Terms:** the Met Office's [terms and conditions](https://en.vedur.is/about-imo/the-web/conditions) allow free use of its data, forecasts included, provided the Met Office and the download date are cited and any changes are stated clearly.
+
 ## Changes made to the data
 
 CC BY 4.0 requires saying whether the data was changed. It was:
@@ -52,7 +60,9 @@ CC BY 4.0 requires saying whether the data was changed. It was:
 - **Eval scenarios (`evals/scenarios.py`) deliberately change the conditions snapshot in memory** to create test cases: fictional closures, a fictional wind warning, ice and height limit, and a fake injected instruction. **These changes are invented test data, not Vegagerðin data.** Saved eval transcripts in `evals/results/` contain this altered data and must not be read as real road conditions.
 - **Weather tool output** selects the stations near a route and summarises their observations (ice and gust flags use this project's thresholds). It does not change the observed values.
 - **Eval scenarios also change the weather snapshot in memory:** every observation time is moved two weeks back, so the newest is 5 minutes before the eval clock (2026-11-06 15:00 UTC), to match the road snapshot. One scenario replaces the Holtavörðuheiði readings with invented storm values (33 m/s gusts). **These are invented test data, not Veðurstofa Íslands data.**
+- **Forecast tool output** gives each station's forecast for the estimated arrival time (an assumed 70 km/h) and adds wind, ice and snow flags using this project's thresholds. It does not change the forecast values.
+- **Eval scenarios change the forecast snapshot in memory:** all times are moved exactly 14 days back (issued 2026-11-06 12:00), and one scenario replaces Holtavörðuheiði's forecast on the morning of 2026-11-09 with an invented storm (mean wind 24 m/s, snow, -3 °C). **These are invented test data, not Veðurstofa Íslands forecasts.**
 
 ## How to cite
 
-> Road condition data and road segment geometry: Vegagerðin, datasets `faerd2017_1` (downloaded 2026-11-06) and `faerdferlar2017_1` (downloaded November 2026), licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Weather observations and station data: Veðurstofa Íslands, api.vedur.is (downloaded 2026-11-20), licensed under CC BY 4.0. Modified: see DATA_LICENSE.md.
+> Road condition data and road segment geometry: Vegagerðin, datasets `faerd2017_1` (downloaded 2026-11-06) and `faerdferlar2017_1` (downloaded November 2026), licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Weather observations and station data: Veðurstofa Íslands, api.vedur.is (downloaded 2026-11-20), licensed under CC BY 4.0. Weather forecasts: Veðurstofa Íslands, xmlweather.vedur.is (downloaded 2026-11-20). Modified: see DATA_LICENSE.md.

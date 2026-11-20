@@ -11,6 +11,8 @@ from roadroute import CachedConditions, RoadNetwork, RoutePlanner, Toolbox, fetc
 from roadroute.conditions import ATTRIBUTION
 from roadroute.weather import ATTRIBUTION as WEATHER_ATTRIBUTION
 from roadroute.weather import Cached, RouteWeather, fetch_latest, fetch_stations
+from roadroute.forecast import ATTRIBUTION as FORECAST_ATTRIBUTION
+from roadroute.forecast import CachedForecasts, RouteForecast
 
 from .config import DEFAULT_MODEL, AgentConfig
 from .loop import Agent
@@ -29,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         help="'live' to fetch Vegagerðin's feed, or a path to a saved faerd2017_1 XML file",
     )
     parser.add_argument("--no-weather", action="store_true",
-                        help="don't offer the weather tool (Veðurstofa Íslands observations)")
+                        help="don't offer the weather and forecast tools (Veðurstofa Íslands)")
     parser.add_argument("--json", action="store_true", help="print the full run record as JSON")
     parser.add_argument("-v", "--verbose", action="store_true", help="log every loop iteration")
     args = parser.parse_args(argv)
@@ -54,10 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         snapshot = load_conditions(args.conditions)
         source = lambda: snapshot  # noqa: E731 - a fixed snapshot
-    weather = None
+    weather = forecast = None
     if not args.no_weather:
-        weather = RouteWeather(Cached(fetch_stations, ttl_s=24 * 3600), Cached(fetch_latest, ttl_s=300))
-    toolbox = Toolbox(RoutePlanner(RoadNetwork.load(args.network), source), weather=weather)
+        stations = Cached(fetch_stations, ttl_s=24 * 3600)  # shared by observations and forecasts
+        weather = RouteWeather(stations, Cached(fetch_latest, ttl_s=300))
+        forecast = RouteForecast(stations, CachedForecasts())
+    toolbox = Toolbox(RoutePlanner(RoadNetwork.load(args.network), source), weather=weather, forecast=forecast)
     config = AgentConfig(model=args.model, effort=args.effort, max_iterations=args.max_iterations)
     agent = Agent(anthropic.Anthropic(), toolbox, config)
 
@@ -80,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"--- {ATTRIBUTION}")
         if any(c.name == "get_route_weather" for c in result.tool_calls):
             print(f"--- {WEATHER_ATTRIBUTION}")
+        if any(c.name == "get_route_forecast" for c in result.tool_calls):
+            print(f"--- {FORECAST_ATTRIBUTION}")
     return 0 if result.ok else 1
 
 

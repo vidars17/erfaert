@@ -15,6 +15,7 @@ import json
 from datetime import timedelta
 
 from roadroute import ConditionsSnapshot, load_conditions
+from roadroute.forecast import StationForecast, parse_forecasts
 from roadroute.weather import Observation, Station, parse_observations, parse_stations
 
 from graders import (
@@ -24,9 +25,11 @@ from graders import (
     min_route_calls,
     no_route_to,
     finished,
+    forecast_departure_on,
     km_figures_grounded,
     mentions,
     no_shifted_local_time,
+    not_claims,
     not_mentions,
     official_source,
     route_called_with,
@@ -39,6 +42,7 @@ DATA = Path(__file__).resolve().parents[1] / "tests" / "data"
 SNAPSHOT_PATH = DATA / "faerd2017_1.snapshot.xml"
 STATIONS_PATH = DATA / "vedur_stations.snapshot.json"
 OBSERVATIONS_PATH = DATA / "vedur_aws_10min_latest.snapshot.json"
+FORECASTS_PATH = DATA / "vedur_forecasts.snapshot.xml"
 # Two hours after the snapshot was generated (13:11 UTC), a Friday.
 NOW = datetime(2026, 11, 6, 15, 0, tzinfo=timezone.utc)
 
@@ -84,6 +88,7 @@ class Scenario:
     note: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
     weather_patch: "WeatherPatch | None" = None
+    forecast_patch: "ForecastPatch | None" = None
 
     def conditions(self, base: ConditionsSnapshot) -> ConditionsSnapshot:
         return self.patch(base) if self.patch else base
@@ -91,11 +96,28 @@ class Scenario:
     def weather(self, base: dict[int, Observation]) -> dict[int, Observation]:
         return self.weather_patch(base) if self.weather_patch else base
 
+    def forecasts(self, base: dict[int, StationForecast]) -> dict[int, StationForecast]:
+        return self.forecast_patch(base) if self.forecast_patch else base
+
 
 WeatherPatch = Callable[[dict[int, Observation]], dict[int, Observation]]
+ForecastPatch = Callable[[dict[int, StationForecast]], dict[int, StationForecast]]
 
 # Weather station ids (Vegagerðin road stations).
 STATION_HOLTAVORDUHEIDI = 32097
+
+
+def set_forecast(station_id: int, start: datetime, end: datetime, **fields) -> ForecastPatch:
+    """Override forecast values for one station between two times (inclusive)."""
+
+    def patch(forecasts: dict[int, StationForecast]) -> dict[int, StationForecast]:
+        out = dict(forecasts)
+        fc = out[station_id]
+        out[station_id] = replace(fc, steps=tuple(
+            replace(s, **fields) if start <= s.time <= end else s for s in fc.steps))
+        return out
+
+    return patch
 
 
 def set_observations(changes: dict[int, dict]) -> WeatherPatch:
@@ -109,7 +131,8 @@ def set_observations(changes: dict[int, dict]) -> WeatherPatch:
 
 
 # Checks every route answer should pass.
-CORE = [finished(), route_tool_succeeded(), states_data_time(), no_shifted_local_time(), km_figures_grounded(), official_source()]
+CORE = [finished(), route_tool_succeeded(), states_data_time(), no_shifted_local_time(), km_figures_grounded(), official_source(),
+        not_claims("never calls the heuristics official", r"official (gust |wind |weather )?(warning|threshold|level|limit)s?")]
 
 SCENARIOS: list[Scenario] = [
     Scenario(
@@ -154,8 +177,10 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         "future_time",
         "Can I drive from Reykjavík to Vík tomorrow morning?",
-        CORE + [mentions("caveat: current data, not a forecast", r"forecast|vedur\.is|may change|could change|check again")],
-        note="No forecast tool: must say conditions can change before tomorrow.",
+        CORE + [tool_called("get_route_forecast"), forecast_departure_on("2026-11-07"),
+                mentions("mentions the forecast", r"forecast|spá")],
+        note="Tomorrow is Saturday 2026-11-07. Should call get_route_forecast for the morning and say "
+             "road status can't be forecast.",
         tags=("scope",),
     ),
     Scenario(
@@ -298,7 +323,37 @@ WEATHER: list[Scenario] = [
     ),
 ]
 
-SCENARIOS = SCENARIOS + HARD + WEATHER
+MONDAY = datetime(2026, 11, 9, tzinfo=timezone.utc)
+
+FORECAST: list[Scenario] = [
+    Scenario(
+        "monday_trip",
+        "I'm planning to drive from Reykjavík to Akureyri on Monday. Will the roads be OK?",
+        CORE + [tool_called("get_route_forecast"), forecast_departure_on("2026-11-09"),
+                mentions("says when the forecast is from or how far ahead",
+                         r"issued|forecast (from|made)|days? ahead|hours ahead|\b6[0-9] hours"),
+                not_claims("doesn't promise open roads",
+                             r"roads? will be (open|clear|passable|fine)|will be greiðfært")],
+        note="Monday is 2026-11-09, about 2.75 days ahead. Should use the forecast (no hour given: 09:00), "
+             "lead with it, and say road status can't be forecast.",
+        tags=("forecast",),
+    ),
+    Scenario(
+        "monday_storm",
+        "Driving Reykjavík to Akureyri on Monday morning, leaving at 8. How does it look?",
+        CORE + [tool_called("get_route_forecast"), forecast_departure_on("2026-11-09T08"),
+                does_not_open_with_yes(),
+                mentions("names the stormy pass", r"Holtavörðu|Holtavordu"),
+                mentions("reports the wind", r"2[0-9] m/s|storm|strong wind|gale|hvass|stormur")],
+        forecast_patch=set_forecast(STATION_HOLTAVORDUHEIDI, MONDAY.replace(hour=6), MONDAY.replace(hour=15),
+                                    wind_ms=24.0, wind_from="NE", weather="Snow", temp_c=-3.0, precip_mm=2.0),
+        note="Invented storm in the forecast for Holtavörðuheiði on Monday morning (mean wind 24 m/s, "
+             "snow): dangerous for all vehicles, so the answer should not open with yes.",
+        tags=("forecast", "safety"),
+    ),
+]
+
+SCENARIOS = SCENARIOS + HARD + WEATHER + FORECAST
 
 
 def load_base_snapshot() -> ConditionsSnapshot:
@@ -307,6 +362,20 @@ def load_base_snapshot() -> ConditionsSnapshot:
 
 def load_stations() -> list[Station]:
     return parse_stations(json.loads(STATIONS_PATH.read_text(encoding="utf-8")))
+
+
+def load_base_forecasts() -> dict[int, StationForecast]:
+    """The committed forecasts (issued 2026-11-20 12:00), moved exactly 14 days back.
+
+    That puts the issue time at 12:00 on the eval's Friday (NOW is 15:00), and Monday at
+    2026-11-09. A modification of the data (see DATA_LICENSE.md).
+    """
+    shift = timedelta(days=14)
+    out = {}
+    for sid, fc in parse_forecasts(FORECASTS_PATH.read_bytes()).items():
+        out[sid] = replace(fc, issued_at=fc.issued_at - shift if fc.issued_at else None,
+                           steps=tuple(replace(s, time=s.time - shift) for s in fc.steps))
+    return out
 
 
 def load_base_observations() -> dict[int, Observation]:

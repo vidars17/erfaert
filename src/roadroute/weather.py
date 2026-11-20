@@ -202,6 +202,23 @@ def sample_path(points: Sequence[PathPoint], spacing_km: float) -> list[PathPoin
     return samples
 
 
+def stations_along(
+    stations: Sequence[Station], path: Sequence[PathPoint], spacing_km: float = 1.0, max_station_km: float = 6.0,
+) -> list[tuple[Station, PathPoint, float]]:
+    """Stations within ``max_station_km`` of the route: (station, nearest point, distance km), in driving order.
+
+    Shared by the observation and forecast tools, so both report on the same stations.
+    """
+    best: dict[int, tuple[Station, PathPoint, float]] = {}
+    limit_m = max_station_km * 1000
+    for point in sample_path(path, spacing_km):
+        for station in stations:
+            d = math.hypot(station.x - point.x, station.y - point.y)
+            if d <= limit_m and (station.id not in best or d < best[station.id][2] * 1000):
+                best[station.id] = (station, point, d / 1000)
+    return sorted(best.values(), key=lambda item: item[1].km)
+
+
 def _gust_flag(obs: Observation) -> str | None:
     if obs.gust_ms is not None and obs.gust_ms >= GUST_ALL_VEHICLES_MS:
         return f"gusts {obs.gust_ms:.0f} m/s: dangerous for all vehicles"
@@ -221,14 +238,35 @@ def _has_reading(obs: Observation) -> bool:
     return any(v is not None for v in (obs.air_temp_c, obs.road_temp_c, obs.wind_ms, obs.gust_ms))
 
 
-def _spread(rows: list, n: int) -> list:
-    """n items spread evenly through rows (rows are in driving order)."""
+def spread(rows: Sequence, n: int) -> list:
+    """n items spread evenly through rows, always including the first and last.
+
+    (An earlier version stepped by len/n and never reached the last item, which dropped the
+    station nearest the destination, e.g. Öxnadalsheiði on the way to Akureyri.)
+    """
     if n <= 0 or not rows:
         return []
     if n >= len(rows):
         return list(rows)
-    step = len(rows) / n
-    return [rows[int(i * step)] for i in range(n)]
+    if n == 1:
+        return [rows[len(rows) // 2]]
+    picks = sorted({round(i * (len(rows) - 1) / (n - 1)) for i in range(n)})
+    return [rows[i] for i in picks]
+
+
+def pick_stations(rows: Sequence, n: int, *, is_road: Callable, elevation: Callable) -> list:
+    """Choose n of ``rows`` (in driving order): the highest road stations first (the passes,
+    where weather turns), then road stations spread along the route, then any others."""
+    if len(rows) <= n:
+        return list(rows)
+    road = [r for r in rows if is_road(r)]
+    other = [r for r in rows if not is_road(r)]
+    keep = sorted(road, key=lambda r: elevation(r) or 0, reverse=True)[: n // 3]
+    rest = [r for r in road if r not in keep]
+    keep += spread(rest, n - len(keep))
+    keep += spread(other, n - len(keep))
+    order = {id(r): i for i, r in enumerate(rows)}
+    return sorted(keep, key=lambda r: order[id(r)])
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -260,15 +298,7 @@ class RouteWeather:
 
     def stations_along(self, path: Sequence[PathPoint]) -> list[tuple[Station, PathPoint, float]]:
         """(station, nearest sample point, distance from route in km), in driving order."""
-        best: dict[int, tuple[Station, PathPoint, float]] = {}
-        stations = self._stations()
-        limit_m = self.max_station_km * 1000
-        for point in sample_path(path, self.spacing_km):
-            for station in stations:
-                d = math.hypot(station.x - point.x, station.y - point.y)
-                if d <= limit_m and (station.id not in best or d < best[station.id][2] * 1000):
-                    best[station.id] = (station, point, d / 1000)
-        return sorted(best.values(), key=lambda item: item[1].km)
+        return stations_along(self._stations(), path, self.spacing_km, self.max_station_km)
 
     def summarise(self, path: Sequence[PathPoint]) -> dict[str, Any]:
         observations = self._observations()
@@ -284,14 +314,13 @@ class RouteWeather:
                 rows.append((station, point, obs))
 
         if len(rows) > self.max_stations:
-            # Keep every gust warning, then road stations (on the road, measure the road surface)
-            # spread along the route, then fill with the rest.
-            gusty = [r for r in rows if _gust_flag(r[2])]
-            road = [r for r in rows if r not in gusty and r[0].road_station]
-            other = [r for r in rows if r not in gusty and not r[0].road_station]
-            keep = gusty[: self.max_stations]
-            keep += _spread(road, self.max_stations - len(keep))
-            keep += _spread(other, self.max_stations - len(keep))
+            # Keep every gust warning; fill the rest with the passes, then road stations
+            # (on the road, measuring the road surface) spread along the route, then the others.
+            gusty = [r for r in rows if _gust_flag(r[2])][: self.max_stations]
+            calm = [r for r in rows if r not in gusty]
+            keep = gusty + pick_stations(calm, self.max_stations - len(gusty),
+                                         is_road=lambda r: r[0].road_station,
+                                         elevation=lambda r: r[0].elevation_m)
             rows = sorted(keep, key=lambda r: r[1].km)
 
         icy = [r for r in rows if _ice_possible(r[2])]
